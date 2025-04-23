@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Maptiler Weather Layers</title>
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  />
+  <script src="https://cdn.maptiler.com/maptiler-sdk-js/v3.0.1/maptiler-sdk.umd.min.js"></script>
+  <link href="https://cdn.maptiler.com/maptiler-sdk-js/v3.0.1/maptiler-sdk.css" rel="stylesheet" />
+  <script src="https://cdn.maptiler.com/maptiler-weather/v3.0.1/maptiler-weather.umd.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; background-color: #3E4048;}
+    #pointer-data{ z-index: 1; position: fixed; font-size: 20px; font-weight: 900; margin: 27px 0px 0px 10px; color: #fff; text-shadow: 0px 0px 10px #0007;}
+    #variable-name{ z-index: 1; position: fixed; font-size: 20px; font-weight: 500; margin: 5px 0px 0px 10px; color: #fff; text-shadow: 0px 0px 10px #0007; text-transform:capitalize;}
+    #time-info{ position: fixed; width: 60vw; bottom: 0; z-index: 1; margin: 10px; text-shadow: 0px 0px 5px black; color: white; font-size: 18px; font-weight: 500; text-align: center; left: 0; right: 0; margin: auto; padding: 20px;}
+    #time-text{ font-size: 12px; font-weight: 600;}
+    #time-slider{ width: 100%; height: fit-content; left: 0; right: 0; z-index: 1; filter: drop-shadow(0 0 7px #000a); margin-top: 10px;}
+    #buttons{ width: auto; margin: 0 10px; padding:0; position:absolute; top: 50px; left:0; z-index:99;}
+    .button{ display: block; position: relative; margin: 10px 0 0 0; font-size: 0.9em;}
+    /* Style for active button */
+    .button.active { border: 2px solid yellow; }
+  </style>
+</head>
+<body>
+  <div id="time-info">
+    <span id="time-text"></span>
+    <button id="play-pause-bt" class="btn btn-primary btn-sm time-button">Play</button>
+    <input type="range" id="time-slider" min="0" max="11" step="1"> </div>
+
+  <div id="variable-name">Radar</div> <div id="pointer-data"></div>
+  <div id="map">
+    <ul id="buttons">
+      <li id="precipitation" class="btn btn-primary button">Precipitation</li>
+      <li id="radar" class="btn btn-primary button active">Radar</li> <li id="temperature" class="btn btn-primary button">Temperature</li>
+      <li id="wind" class="btn btn-primary button">Wind</li>
+    </ul>
+  </div>
+
+  <script>
+      // --- Global variables ---
+      let map; // To hold the map instance
+      let activeLayer = "radar"; // Start with radar active
+      let pointerLngLat = null;
+      let isPlaying = false;
+      let currentTime = null; // To store time when switching layers
+
+      // Define available layers (Pressure removed)
+      const weatherLayers = {
+        "precipitation": {
+          "layer": null, "value": "value", "units": " mm"
+        },
+        // "pressure": { ... removed ... },
+        "radar": {
+          "layer": null, "value": "value", "units": " dBZ"
+        },
+        "temperature": {
+          "layer": null, "value": "value", "units": "°"
+        },
+        "wind": {
+          "layer": null, "value": "speedMetersPerSecond", "units": " m/s"
+        }
+      };
+
+      const timeInfoContainer = document.getElementById("time-info");
+      const timeTextDiv = document.getElementById("time-text");
+      const timeSlider = document.getElementById("time-slider");
+      const playPauseButton = document.getElementById("play-pause-bt");
+      const pointerDataDiv = document.getElementById("pointer-data");
+
+      // ============================================================
+      // == FUNCTION CALLED FROM FLUTTER TO INITIALIZE EVERYTHING ==
+      // ============================================================
+      function initializeMap(apiKeyFromFlutter, initialLat, initialLng, initialZoom) {
+          console.log("Received data from Flutter:", apiKeyFromFlutter, initialLat, initialLng, initialZoom);
+          if (!apiKeyFromFlutter) {
+              console.error("API Key is missing!");
+              document.getElementById('map').innerHTML = '<p style="color:red; padding: 10px;">Error: MapTiler API Key is missing.</p>';
+              return;
+          }
+
+          // 1. Configure MapTiler SDK
+          maptilersdk.config.apiKey = apiKeyFromFlutter;
+
+          // 2. Create the Map Instance
+          map = new maptilersdk.Map({
+              container: 'map',
+              style: maptilersdk.MapStyle.BACKDROP, // Or STREETS, DATAVIZ etc.
+              zoom: initialZoom,
+              center: [initialLng, initialLat], // Use passed Lng/Lat
+              hash: true, // Optional: adds position info to URL hash
+              projectionControl: true, // Optional
+              projection: 'globe' // Optional
+          });
+
+          // 3. Add Event Listeners (after map is created)
+          map.on('load', function () {
+              console.log("Map style loaded.");
+              map.setPaintProperty("Water", 'fill-color', "rgba(0, 0, 0, 0.4)"); // Example style adjustment
+              // Initialize the default weather layer (now 'radar')
+              initWeatherMap(activeLayer);
+          });
+
+          map.on('mouseout', function(evt) {
+              if (!evt.originalEvent.relatedTarget) {
+                  pointerDataDiv.innerText = "";
+                  pointerLngLat = null;
+              }
+          });
+
+          map.on('mousemove', (e) => {
+              updatePointerValue(e.lngLat);
+          });
+
+          // 4. Setup UI Event Listeners (Buttons, Slider, Play/Pause)
+          setupUIListeners();
+
+          console.log("Map initialization sequence started.");
+      }
+      // ============================================================
+
+      function setupUIListeners() {
+        // -- Time Slider Input --
+        timeSlider.addEventListener("input", (evt) => {
+          const weatherLayer = weatherLayers[activeLayer]?.layer;
+          if (weatherLayer) {
+            // Note: timeSlider.value is milliseconds since epoch as a string
+            weatherLayer.setAnimationTime(parseInt(timeSlider.value / 1000));
+          }
+        });
+
+        // -- Play/Pause Button --
+        playPauseButton.addEventListener("click", () => {
+          const weatherLayer = weatherLayers[activeLayer]?.layer;
+          if (weatherLayer) {
+            if (isPlaying) {
+              pauseAnimation(weatherLayer);
+            } else {
+              playAnimation(weatherLayer);
+            }
+          }
+        });
+
+        // -- Layer Buttons --
+        document.getElementById('buttons').addEventListener('click', function (event) {
+          // Check if the clicked element is one of the layer buttons
+          if (event.target && event.target.matches('li.button')) {
+              changeWeatherLayer(event.target.id);
+          }
+        });
+      }
+
+      function pauseAnimation(weatherLayer) {
+        if (!weatherLayer) return;
+        weatherLayer.animateByFactor(0);
+        playPauseButton.innerText = "Play";
+        isPlaying = false;
+      }
+
+      function playAnimation(weatherLayer) {
+        if (!weatherLayer) return;
+        weatherLayer.animateByFactor(3600); // Animate 1 hour per second
+        playPauseButton.innerText = "Pause";
+        isPlaying = true;
+      }
+
+      function updatePointerValue(lngLat) {
+        if (!lngLat || !activeLayer) return;
+        pointerLngLat = lngLat;
+        const layerInfo = weatherLayers[activeLayer];
+        const weatherLayer = layerInfo?.layer;
+
+        if (weatherLayer) {
+          const value = weatherLayer.pickAt(lngLat.lng, lngLat.lat);
+          if (!value || value[layerInfo.value] === null || value[layerInfo.value] === undefined) {
+            pointerDataDiv.innerText = ""; // Clear if no data at point
+            return;
+          }
+          // Format the value (e.g., 1 decimal place)
+          pointerDataDiv.innerText = `${value[layerInfo.value].toFixed(1)}${layerInfo.units}`;
+        } else {
+            pointerDataDiv.innerText = ""; // Clear if layer not ready
+        }
+      }
+
+      function changeWeatherLayer(type) {
+        // Only proceed if type is valid and different from current active layer
+        if (!weatherLayers[type] || type === activeLayer) {
+            return;
+        }
+
+        console.log(`Changing layer to: ${type}`);
+
+        // Hide the currently active layer
+        if (activeLayer && map.getLayer(activeLayer)) {
+          const currentActiveWeatherLayer = weatherLayers[activeLayer]?.layer;
+          if (currentActiveWeatherLayer) {
+            currentTime = currentActiveWeatherLayer.getAnimationTime(); // Store time
+            map.setLayoutProperty(activeLayer, 'visibility', 'none');
+            pauseAnimation(currentActiveWeatherLayer); // Stop animation of old layer
+          }
+        }
+
+        // Set new active layer
+        activeLayer = type;
+        const weatherLayer = weatherLayers[activeLayer].layer || createWeatherLayer(activeLayer);
+
+        // Show the new layer (add if needed, otherwise make visible)
+        if (map.getLayer(activeLayer)) {
+          map.setLayoutProperty(activeLayer, 'visibility', 'visible');
+        } else if (weatherLayer) {
+          // Ensure the layer is added below a reference layer, e.g., 'Water' or labels
+          // Find first symbol layer to insert before, or default to 'Water'
+          let firstSymbolId;
+          const layers = map.getStyle().layers;
+          for (let i = 0; i < layers.length; i++) {
+              if (layers[i].type === 'symbol') {
+                  firstSymbolId = layers[i].id;
+                  break;
+              }
+          }
+          map.addLayer(weatherLayer, firstSymbolId || 'Water');
+        } else {
+            console.error(`Failed to create or find layer for type: ${type}`);
+            return; // Exit if layer couldn't be created/found
+        }
+
+        changeLayerLabel(activeLayer);
+        activateButton(activeLayer);
+        // Apply stored time and animation state to the new layer
+        changeLayerAnimation(weatherLayer);
+
+        // Update pointer value immediately for the new layer
+        updatePointerValue(pointerLngLat);
+      }
+
+      function activateButton(activeLayerId) {
+        const buttons = document.querySelectorAll('#buttons .button');
+        buttons.forEach(btn => {
+          if (btn.id === activeLayerId) {
+            btn.classList.add('active');
+          } else {
+            btn.classList.remove('active');
+          }
+        });
+      }
+
+      function changeLayerAnimation(weatherLayer) {
+          if (!weatherLayer) return;
+          // If we have a stored time (from switching layers), use it. Otherwise, use current slider value.
+          const timeToSet = currentTime !== null ? currentTime : parseInt(timeSlider.value / 1000);
+          weatherLayer.setAnimationTime(timeToSet);
+          currentTime = null; // Reset stored time after using it
+
+          // Apply correct play/pause state
+          if (isPlaying) {
+            playAnimation(weatherLayer);
+          } else {
+            pauseAnimation(weatherLayer);
+          }
+      }
+
+      function createWeatherLayer(type){
+        let weatherLayer = null;
+        console.log(`Creating layer: ${type}`);
+        switch (type) {
+          case 'precipitation':
+            weatherLayer = new maptilerweather.PrecipitationLayer({id: 'precipitation'});
+            break;
+          // case 'pressure': ... removed ...
+          case 'radar':
+            weatherLayer = new maptilerweather.RadarLayer({ opacity: 0.8, id: 'radar' });
+            break;
+          case 'temperature':
+            weatherLayer = new maptilerweather.TemperatureLayer({
+              colorramp: maptilerweather.ColorRamp.builtin.TEMPERATURE_3, // Example color ramp
+              id: 'temperature'
+            });
+            break;
+          case 'wind':
+            weatherLayer = new maptilerweather.WindLayer({id: 'wind'});
+            break;
+          default:
+             console.error(`Unknown layer type requested: ${type}`);
+             return null;
+        }
+
+        // --- Attach common event listeners to the newly created layer ---
+        weatherLayer.on("tick", event => {
+          // Only refresh time if this layer is the currently active one
+          if (activeLayer === type) {
+            refreshTime();
+            updatePointerValue(pointerLngLat);
+          }
+        });
+
+        weatherLayer.on("animationTimeSet", event => {
+            if (activeLayer === type) {
+                refreshTime();
+                updatePointerValue(pointerLngLat); // Also update pointer on manual time set
+            }
+        });
+
+        weatherLayer.on("sourceReady", event => {
+          console.log(`Source ready for layer: ${type}`);
+          // Only update slider range if this is the currently active layer
+          // AND if the slider hasn't been initialized yet (min === 0)
+          if (activeLayer === type) {
+            const startDate = weatherLayer.getAnimationStartDate();
+            const endDate = weatherLayer.getAnimationEndDate();
+
+            if (startDate && endDate) {
+               // Set min/max only once or when they change significantly
+               // Using `+startDate` converts Date object to milliseconds timestamp
+               if (timeSlider.min !== String(+startDate) || timeSlider.max !== String(+endDate)) {
+                   timeSlider.min = +startDate;
+                   timeSlider.max = +endDate;
+                   // Set current value after setting min/max
+                   timeSlider.value = +weatherLayer.getAnimationTimeDate();
+                   console.log(`Slider range updated for ${type}: ${startDate} to ${endDate}`);
+                   refreshTime(); // Refresh display after range update
+               }
+
+               // If a specific time was stored (from layer switch), apply it
+               if (currentTime !== null) {
+                   weatherLayer.setAnimationTime(currentTime);
+                   currentTime = null; // Reset stored time
+                   if(isPlaying) playAnimation(weatherLayer); else pauseAnimation(weatherLayer);
+               }
+            } else {
+                console.warn(`Could not get valid start/end dates for layer: ${type}`);
+            }
+          }
+        });
+
+        // Store the created layer instance
+        weatherLayers[type].layer = weatherLayer;
+        return weatherLayer;
+      }
+
+      function refreshTime() {
+        const weatherLayer = weatherLayers[activeLayer]?.layer;
+        if (weatherLayer) {
+          try{
+            const d = weatherLayer.getAnimationTimeDate();
+            if (d && typeof d.toISOString === 'function') { // Check if 'd' is a valid Date
+                timeTextDiv.innerText = d.toLocaleString(); // Use locale string for better readability
+                // Only update slider if the user isn't currently dragging it
+                if (document.activeElement !== timeSlider) {
+                    timeSlider.value = +d;
+                }
+            } else {
+                 timeTextDiv.innerText = "Loading time...";
+            }
+          } catch(e) {
+            console.error("Error refreshing time:", e);
+            timeTextDiv.innerText = "Error loading time";
+          }
+        } else {
+            timeTextDiv.innerText = ""; // Clear if no active layer
+        }
+      }
+
+      function changeLayerLabel(type) {
+        // Capitalize first letter for display
+        const label = type.charAt(0).toUpperCase() + type.slice(1);
+        document.getElementById("variable-name").innerText = label;
+      }
+
+      // Function to kick off the initial weather layer setup after map loads
+      function initWeatherMap(type) {
+          console.log(`Initializing default weather map layer: ${type}`);
+          changeWeatherLayer(type); // This will create/show the layer and set button states
+      }
+
+  </script>
+</body>
+</html>
